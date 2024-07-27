@@ -1,39 +1,100 @@
-import time, framebuf
+import time as _time
+import framebuf as _framebuf
+try:
+    import st7789 as _st7789 # type: ignore
+except ModuleNotFoundError:
+    try:
+        import st7789py as _st7789 # type: ignore
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError("Could not find either st7789_mpy or st7789py_mpy")
+try:
+    import vga1_8x8 as _vga1_8x8 # type: ignore
+    import vga2_8x8 as _vga2_8x8 # type: ignore
+except ModuleNotFoundError:
+    raise ModuleNotFoundError("Could not find vga1_8x8 font / vga2_8x8 font")
 
-class TimeGraph():
-    xMin = 0
-    def __init__(self, xPos, yPos, width, height, xMax, yMin, yMax, xDivisions, yDivisions):
-        self.xPos = xPos
-        self.yPos = yPos
+class _DrawObject():
+    def __init__(self, color: object):
+        self.color = color
+    
+    def draw(self):
+        raise NotImplementedError
+
+class _Line(_DrawObject):
+    def __init__(self, *_, x0: int, y0: int, x1: int, y1: int, color: object):
+        super().__init__(color)
+        self.x0 = x0
+        self.y0 = y0
+        self.x1 = x1
+        self.y1 = y1
+
+    def draw(self, *_, buffer: _framebuf.FrameBuffer | None = None, display: _st7789.ST7789 | None = None):
+        if buffer is not None:
+            buffer.line(self.x0, self.y0, self.x1, self.y1, self.color)
+        if display is not None:
+            display.line(self.x0, self.y0, self.x1, self.y1, self.color)
+        raise RuntimeError("No display or buffer provided")
+
+    @classmethod
+    def generate(cls, points: list[tuple[int, int]], color: object):
+        return [
+            cls(
+                x0 = round(i[0]),
+                y0 = round(i[1]),
+                x1 = round(j[0]),
+                y1 = round(j[1]),
+                color = color
+            ) for i,j in zip(points[0:-1], points[1:])
+        ]
+
+class _Text(_DrawObject):
+    def __init__(self, *_, anchor: str, x: int, y: int, text: str, vga2: bool, color: object):
+        super().__init__(color)
+        self.anchor = anchor
+        self.x = x
+        self.y = y
+        self.text = text
+        self.vga2 = vga2
+        if self.anchor == "rightcenter":
+            self.x -= (8*len(self.text))
+            self.y -= 4
+        if self.anchor == "leftcenter":
+            self.y -= 4
+        if self.anchor == "topcenter":
+            self.x -= (8*len(self.text))//2
+        if self.anchor == "bottomcenter":
+            self.x -= (8*len(self.text))//2
+            self.y -= 8
+        if self.anchor == "center":
+            self.x -= (8*len(self.text))//2
+            self.y -= 4
+        
+
+    def draw(self, *_, display: _st7789.ST7789 | None = None):
+        if display is not None:
+            display.text(_vga2_8x8 if self.vga2 else _vga1_8x8, self.text, self.x, self.y, self.color)
+        raise RuntimeError("No display provided")
+
+
+class TimePlot():
+    def __init__(self, *_, x: int, y: int, width: int, height: int, maxDataPoints: int, minDataRange: int, maxDataRange: int, dataPointsDivisions: int = 3, dataRangeDivisions: int = 1, dataPointsFormatter: function = lambda a: f"-{a}f", dataRangeFormatter: function = lambda a: f"{a}C"):
+        self.xPos = x
+        self.yPos = y
         self.width = width
         self.height = height
-        self.xMax = xMax
-        # self.xMax = xMax
-        self.yMin = yMin
-        self.yMax = yMax
-        self.yDivisions = yDivisions # yMin, ..., yMax
-        self.xDivisions = xDivisions # 0,5,10 ... xMax
+        self.xMin = 0
+        self.xMax = maxDataPoints
+        self.yMin = minDataRange
+        self.yMax = maxDataRange
+        self.yDivisions = sorted(set([(i*(self.yMax-self.yMin)//(dataRangeDivisions+1))+self.yMin for i in range(dataRangeDivisions+2)]))
+        self.xDivisions = sorted(set([(i*(self.xMax-self.xMin)//(dataPointsDivisions+1))+self.xMin for i in range(dataPointsDivisions+2)]))
 
-        self.fbuf = framebuf.FrameBuffer(bytearray(width * height * 4), width, height, framebuf.RGB565)
-        self.dataPoints = [self.yMin for i in range(self.xMax)]
+        self.buffer = _framebuf.FrameBuffer(bytearray(self.width * self.height * 4), self.width, self.height, _framebuf.RGB565)
+        self.dataPoints = [self.yMin for i in range(self.xMax-self.xMin)]
 
-    @staticmethod
-    def pointsToLines(points):
-        lines = []
-        for i in range(len(points) - 1):
-            current_point = points[i]
-            next_point = points[i + 1]
-            line_dict = {
-              "draw": "line",
-              "x0": round(current_point[0]),
-              "y0": round(current_point[1]),
-              "x1": round(next_point[0]),
-              "y1": round(next_point[1]),
-              "colour": (0, 0, 255)  # Set blue color for lines
-            }
-            lines.append(line_dict)
-        return lines
-    def drawData(self):
+#TODO: Refactored uptil this point
+
+    def drawPlotData(self, *_, display: _st7789.ST7789):
         ps = []
         for xTime,yTemp in enumerate(self.dataPoints):
             yTemp = (yTemp - self.yMin) / (self.yMax - self.yMin)
@@ -42,15 +103,14 @@ class TimeGraph():
             x = ((xTime) * self.width)
             ps.append((x,y))
 
-        ls = self.pointsToLines(ps)
+        ls = _Line.generate(ps)
 
-        self.fbuf.fill(0)
+        self.buffer.fill(0)
 
         for l in ls:
-            if l["draw"] == "line":
-                self.fbuf.line(l["x0"], l["y0"], l["x1"], l["y1"], st7789.color565(*l["colour"]))
+            l.draw(self.buffer)
         
-        return self.fbuf
+        display.blit_buffer(self.buffer,self.xPos,self.yPos,self.width,self.height)
 
     def drawBox(self):
         queue =[
@@ -212,8 +272,24 @@ tft.init()
     
 # window = pyglet.window.Window(240,240,)#style=pyglet.window.Window.WINDOW_STYLE_BORDERLESS)
 
-g = TimeGraph(40,20,180,80,100,15,40,["-0f", "-2f","-4f", "-6f", "-8f","-10f"],["15°C","20°C","25°C","30°C","35°C","40°C",])
-g2 = TimeGraph(40,140,180,80,100,15,40,["-0f", "-2f","-4f", "-6f", "-8f","-10f"],["15°C","20°C","25°C","30°C","35°C","40°C",])
+g = TimePlot(
+    x=40,
+    y=20,
+    width=180,
+    height=80,
+    maxDataPoints=100,
+    minDataRange=15,
+    maxDataRange=40,
+)
+g2 = TimePlot(
+    x=40,
+    y=140,
+    width=180,
+    height=80,
+    maxDataPoints=100,
+    minDataRange=15,
+    maxDataRange=40,
+)
 d = g.drawBox()
 d2 = g2.drawBox()
 
@@ -233,17 +309,6 @@ while True:
     T2_temp = NTC_Thermistor(T2)
     g.add(T1_temp)
     g2.add(T2_temp)
-    # tft.fill_rect(g.xPos+1,g.yPos,g.width,g.height, st7789.color565(0,0,0))
-    tft.blit_buffer(g.drawData(),g.xPos,g.yPos,g.width,g.height)
-    tft.blit_buffer(g2.drawData(),g2.xPos,g2.yPos,g2.width,g2.height)
-            # d2.append(pyglet.shapes.Line(i["x0"],i["y0"],i["x1"],i["y1"],1,i["colour"]))
-    # time.sleep(0.2)
-    # T1_temp = str(NTC_Thermistor(T1))[:5]
-    # T2_temp = str(NTC_Thermistor(T2))[:5]
-    # SPDT_state = int(bool(SPDT.value()))
-    # SW_state = int(not bool(SW.value()))
-    # val = r.value()
 
-    # tft.text(font, f"T1:{T1_temp}, B:{SPDT_state}          ",10, 0, st7789.color565(255,255,255), st7789.color565(0,0,0))
-    # tft.text(font, f"T2:{T2_temp}, S:{SW_state}",10, 50, st7789.color565(255,0,0), st7789.color565(0,0,0))
-    # tft.text(font, f"Rt Enc:{val}",10, 100, st7789.color565(0,255,0), st7789.color565(0,0,0))
+    g.drawPlotData(display=tft)
+    g2.drawPlotData(display=tft)
